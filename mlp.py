@@ -2,7 +2,7 @@ import os
 import urllib.request
 
 import numpy as np
-from tqdm import trange
+from tqdm import tqdm
 
 
 def sigmoid(z):
@@ -14,11 +14,20 @@ def sigmoid_grad(z):
 
 
 def mse(a, y):
-    return 0.5 * np.sum((y - a) ** 2)
+    return 0.5 * np.sum((a - y) ** 2, axis=1)
 
 
 def mse_grad(a, y):
     return a - y
+
+
+def dataloader(data, batch_size):
+    for i in range(0, len(data), batch_size):
+        batch = data[i:i+batch_size]
+        x, y = zip(*batch)
+        x = np.vstack(x)
+        y = np.vstack(y)
+        yield x, y
 
 
 class MLP:
@@ -27,13 +36,13 @@ class MLP:
         self.sizes = sizes
         
         self.weights = [np.random.randn(y, x).astype(np.float32) for x, y in zip(self.sizes[:-1], self.sizes[1:])]
-        self.biases = [np.random.randn(y, 1).astype(np.float32) for y in self.sizes[1:]]
+        self.biases = [np.random.randn(y).astype(np.float32) for y in self.sizes[1:]]
     
     def forward(self, x, intermediate_outputs=False):
         activations = [x]
         zs = []
         for w, b in zip(self.weights, self.biases):
-            z = w @ x + b
+            z = x @ w.T + b
             x = sigmoid(z)
             if intermediate_outputs:
                 zs.append(z)
@@ -44,20 +53,21 @@ class MLP:
             return x
     
     def backprop(self, x, y):
-        grad_weights = [np.zeros(w.shape) for w in self.weights]
-        grad_biases = [np.zeros(b.shape) for b in self.biases]
+        bsz = x.shape[0]
 
         # forward
         activations, zs = self.forward(x, intermediate_outputs=True)
         loss = mse(activations[-1], y)  # TODO: use cross-entropy
 
         # backward
+        grad_weights = [None] * len(self.weights)
+        grad_biases = [None] * len(self.biases)
         delta = mse_grad(activations[-1], y) * sigmoid_grad(zs[-1])
-        grad_weights[-1] = delta @ activations[-2].T
+        grad_weights[-1] = delta.reshape((bsz, -1, 1)) @ activations[-2].reshape((bsz, 1, -1))
         grad_biases[-1] = delta
         for l in range(2, self.num_layers):
-            delta = (self.weights[-l+1].T @ delta) * sigmoid_grad(zs[-l])
-            grad_weights[-l] = delta @ activations[-l-1].T
+            delta = (delta @ self.weights[-l+1]) * sigmoid_grad(zs[-l])
+            grad_weights[-l] = delta.reshape((bsz, -1, 1)) @ activations[-l-1].reshape((bsz, 1, -1))
             grad_biases[-l] = delta
         
         return loss, grad_weights, grad_biases
@@ -66,36 +76,40 @@ class MLP:
         log = {}
         for epoch in range(epochs):
             np.random.shuffle(train_data)
-            with trange(0, len(train_data), batch_size, desc=f'Epoch {epoch}', leave=(epoch == epochs-1)) as t:
-                for i in t:
-                    batch = train_data[i:i+batch_size]
+            with tqdm(dataloader(train_data, batch_size), desc=f'Epoch {epoch}', leave=(epoch == epochs-1)) as pbar:
+                for batch in pbar:
                     loss = self.train_step(batch, lr)
                     log['train_loss'] = f'{loss:.6f}'
-                    if i % 1000 == 0:
-                        t.set_postfix(**log)
+                    pbar.set_postfix(**log)
                 if val_data:
                     accuracies = []
-                    for i in trange(0, len(val_data), batch_size, desc='Validating', leave=False):
-                        batch = val_data[i:i+batch_size]
+                    for batch in tqdm(dataloader(val_data, batch_size), desc='Validating', leave=False):
                         accuracy = self.val_step(batch)
                         accuracies.append(accuracy)
                     log['val_acc'] = f'{np.mean(accuracies):05.2f}'
     
     def train_step(self, batch, lr):
-        sum_grad_weights = [np.zeros(w.shape) for w in self.weights]
-        sum_grad_biases = [np.zeros(b.shape) for b in self.biases]
-        losses = []
-        for x, y in batch:  # TODO: compute all batch elements at once
-            loss, grad_weights, grad_biases = self.backprop(x, y)
-            losses.append(loss)
-            sum_grad_weights = map(sum, zip(sum_grad_weights, grad_weights))
-            sum_grad_biases = map(sum, zip(sum_grad_biases, grad_biases))
-        self.weights = [w - lr * gw / len(batch) for w, gw in zip(self.weights, sum_grad_weights)]
-        self.biases = [b - lr * gb / len(batch) for b, gb in zip(self.biases, sum_grad_biases)]
-        return np.mean(losses)
+        x, y = batch
+
+        losses, grad_weights, grad_biases = self.backprop(x, y)
+        loss = losses.mean(axis=0)
+        grad_weights = [gw.mean(axis=0) for gw in grad_weights]
+        grad_biases = [gb.mean(axis=0)for gb in grad_biases]
+
+        self.weights = [w - lr * gw for w, gw in zip(self.weights, grad_weights)]
+        self.biases = [b - lr * gb for b, gb in zip(self.biases, grad_biases)]
+
+        return loss
     
     def val_step(self, batch):
-        accuracy = sum([int(np.argmax(self.forward(x)) == y) for x, y in batch]) / len(batch) * 100.0
+        x, y = batch
+        bsz = x.shape[0]
+
+        logits = self.forward(x)
+        predicted = logits.argmax(axis=1)
+        correct = (predicted == y.squeeze()).sum()
+        accuracy = 100 * correct / bsz
+
         return accuracy
 
     @property
@@ -104,7 +118,7 @@ class MLP:
 
 
 if __name__ == "__main__":
-    filename = 'mnist.npz'
+    filename = 'data/mnist.npz'
     if not os.path.exists(filename):
         urllib.request.urlretrieve('https://storage.googleapis.com/tensorflow/tf-keras-datasets/mnist.npz', filename)
     with np.load(filename) as data:
@@ -113,9 +127,9 @@ if __name__ == "__main__":
         test_examples = data['x_test']
         test_labels = data['y_test']
     
-    train_examples = train_examples.reshape((train_examples.shape[0], -1, 1)).astype(np.float32) / 255.
-    test_examples = test_examples.reshape((test_examples.shape[0], -1, 1)).astype(np.float32) / 255.
-    train_targets = np.zeros((train_labels.shape[0], 10, 1), dtype=np.float32)
+    train_examples = train_examples.reshape((train_examples.shape[0], 784)).astype(np.float32) / 255.
+    test_examples = test_examples.reshape((test_examples.shape[0], 784)).astype(np.float32) / 255.
+    train_targets = np.zeros((train_labels.shape[0], 10), dtype=np.float32)
     train_targets[np.arange(train_labels.shape[0]), train_labels] = 1.
     test_labels = test_labels.astype(int)
     
