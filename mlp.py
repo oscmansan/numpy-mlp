@@ -10,23 +10,37 @@ def sigmoid(z):
 
 
 def sigmoid_grad(z):
-    return sigmoid(z) * (1 - sigmoid(z))
+    return z * (1 - z)
 
 
-def mse(a, y):
-    return 0.5 * np.sum((a - y) ** 2, axis=1)
+def softmax(x):
+    x = np.exp(x - np.amax(x, axis=1, keepdims=True))
+    x /= np.sum(x, axis=1, keepdims=True)
+    return x
 
 
-def mse_grad(a, y):
-    return a - y
+def mse(x, y):
+    return ((x - y) ** 2).mean(axis=1) / 2
+
+
+def cross_entropy(x, y):
+    eps = np.finfo(x.dtype).eps
+    x = np.clip(x, eps, 1 - eps)
+    return -np.log(x[np.arange(x.shape[0]), y])
+
+
+def one_hot(y, num_classes=10):
+    z = np.zeros((y.shape[0], num_classes), dtype=np.float32)
+    z[np.arange(y.shape[0]), y] = 1.
+    return z
 
 
 def dataloader(data, batch_size):
     for i in range(0, len(data), batch_size):
         batch = data[i:i+batch_size]
         x, y = zip(*batch)
-        x = np.vstack(x)
-        y = np.vstack(y)
+        x = np.array(x)
+        y = np.array(y)
         yield x, y
 
 
@@ -38,37 +52,34 @@ class MLP:
         self.weights = [np.random.randn(y, x).astype(np.float32) for x, y in zip(self.sizes[:-1], self.sizes[1:])]
         self.biases = [np.random.randn(y).astype(np.float32) for y in self.sizes[1:]]
     
-    def forward(self, x, intermediate_outputs=False):
+    def forward(self, x):
         activations = [x]
-        zs = []
-        for w, b in zip(self.weights, self.biases):
-            z = x @ w.T + b
-            x = sigmoid(z)
-            if intermediate_outputs:
-                zs.append(z)
-                activations.append(x)
-        if intermediate_outputs:
-            return activations, zs
-        else:
-            return x
-    
+        for i in range(self.num_layers - 1):
+            x = x @ self.weights[i].T + self.biases[i]
+            if i < (self.num_layers - 2):
+                x = sigmoid(x)
+            else:
+                x = softmax(x)
+            activations.append(x)
+        return activations
+
     def backprop(self, x, y):
         bsz = x.shape[0]
 
         # forward
-        activations, zs = self.forward(x, intermediate_outputs=True)
-        loss = mse(activations[-1], y)  # TODO: use cross-entropy
+        activations = self.forward(x)
+        loss = mse(activations[-1], y)
 
         # backward
         grad_weights = [None] * len(self.weights)
         grad_biases = [None] * len(self.biases)
-        delta = mse_grad(activations[-1], y) * sigmoid_grad(zs[-1])
+        delta = activations[-1] - y
         grad_weights[-1] = delta.reshape((bsz, -1, 1)) @ activations[-2].reshape((bsz, 1, -1))
         grad_biases[-1] = delta
-        for l in range(2, self.num_layers):
-            delta = (delta @ self.weights[-l+1]) * sigmoid_grad(zs[-l])
-            grad_weights[-l] = delta.reshape((bsz, -1, 1)) @ activations[-l-1].reshape((bsz, 1, -1))
-            grad_biases[-l] = delta
+        for i in range(self.num_layers - 2, 0, -1):
+            delta = (delta @ self.weights[i]) * sigmoid_grad(activations[i])
+            grad_weights[i - 1] = delta.reshape((bsz, -1, 1)) @ activations[i - 1].reshape((bsz, 1, -1))
+            grad_biases[i - 1] = delta
         
         return loss, grad_weights, grad_biases
     
@@ -91,21 +102,20 @@ class MLP:
     def train_step(self, batch, lr):
         x, y = batch
 
-        losses, grad_weights, grad_biases = self.backprop(x, y)
-        loss = losses.mean(axis=0)
+        loss, grad_weights, grad_biases = self.backprop(x, y)
         grad_weights = [gw.mean(axis=0) for gw in grad_weights]
         grad_biases = [gb.mean(axis=0)for gb in grad_biases]
 
         self.weights = [w - lr * gw for w, gw in zip(self.weights, grad_weights)]
         self.biases = [b - lr * gb for b, gb in zip(self.biases, grad_biases)]
 
-        return loss
+        return loss.mean(axis=0)
     
     def val_step(self, batch):
         x, y = batch
         bsz = x.shape[0]
 
-        logits = self.forward(x)
+        logits = self.forward(x)[-1]
         predicted = logits.argmax(axis=1)
         correct = (predicted == y.squeeze()).sum()
         accuracy = 100 * correct / bsz
@@ -129,8 +139,8 @@ if __name__ == "__main__":
     
     train_examples = train_examples.reshape((train_examples.shape[0], 784)).astype(np.float32) / 255.
     test_examples = test_examples.reshape((test_examples.shape[0], 784)).astype(np.float32) / 255.
-    train_targets = np.zeros((train_labels.shape[0], 10), dtype=np.float32)
-    train_targets[np.arange(train_labels.shape[0]), train_labels] = 1.
+    train_labels = train_labels.astype(int)
+    train_targets = one_hot(train_labels)
     test_labels = test_labels.astype(int)
     
     train_data = list(zip(train_examples, train_targets))
