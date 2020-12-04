@@ -45,6 +45,7 @@ class MLP:
     def __init__(self, sizes):
         self.sizes = sizes
         
+        # initialize params
         self.weights = [np.random.randn(y, x).astype(np.float32) for x, y in zip(self.sizes[:-1], self.sizes[1:])]
         self.biases = [np.random.randn(y).astype(np.float32) for y in self.sizes[1:]]
     
