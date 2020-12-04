@@ -23,16 +23,10 @@ def mse(x, y):
     return ((x - y) ** 2).mean(axis=1) / 2
 
 
-def cross_entropy(x, y):
-    eps = np.finfo(x.dtype).eps
+def cross_entropy(x, y, eps=1e-15):
     x = np.clip(x, eps, 1 - eps)
-    return -np.log(x[np.arange(x.shape[0]), y])
-
-
-def one_hot(y, num_classes=10):
-    z = np.zeros((y.shape[0], num_classes), dtype=np.float32)
-    z[np.arange(y.shape[0]), y] = 1.
-    return z
+    x /= x.sum(axis=1)[:, np.newaxis]
+    return -(y * np.log(x)).sum(axis=1)
 
 
 def dataloader(data, batch_size):
@@ -68,7 +62,7 @@ class MLP:
 
         # forward
         activations = self.forward(x)
-        loss = mse(activations[-1], y)
+        loss = cross_entropy(activations[-1], y)
 
         # backward
         grad_weights = [None] * len(self.weights)
@@ -102,10 +96,12 @@ class MLP:
     def train_step(self, batch, lr):
         x, y = batch
 
+        # compute gradients
         loss, grad_weights, grad_biases = self.backprop(x, y)
         grad_weights = [gw.mean(axis=0) for gw in grad_weights]
         grad_biases = [gb.mean(axis=0)for gb in grad_biases]
 
+        # update params
         self.weights = [w - lr * gw for w, gw in zip(self.weights, grad_weights)]
         self.biases = [b - lr * gb for b, gb in zip(self.biases, grad_biases)]
 
@@ -117,7 +113,7 @@ class MLP:
 
         logits = self.forward(x)[-1]
         predicted = logits.argmax(axis=1)
-        correct = (predicted == y.squeeze()).sum()
+        correct = (predicted == y).sum()
         accuracy = 100 * correct / bsz
 
         return accuracy
@@ -127,25 +123,37 @@ class MLP:
         return len(self.sizes)
 
 
+def to_tensor(x):
+    return x.reshape((x.shape[0], -1)).astype(np.float32) / 255.
+
+
+def one_hot(y, num_classes=10):
+    z = np.zeros((y.shape[0], num_classes), dtype=np.float32)
+    z[np.arange(y.shape[0]), y] = 1.
+    return z
+
+
 if __name__ == "__main__":
     filename = 'data/mnist.npz'
     if not os.path.exists(filename):
         urllib.request.urlretrieve('https://storage.googleapis.com/tensorflow/tf-keras-datasets/mnist.npz', filename)
     with np.load(filename) as data:
-        train_examples = data['x_train']
+        train_samples = data['x_train']
         train_labels = data['y_train']
-        test_examples = data['x_test']
+        test_samples = data['x_test']
         test_labels = data['y_test']
     
-    train_examples = train_examples.reshape((train_examples.shape[0], 784)).astype(np.float32) / 255.
-    test_examples = test_examples.reshape((test_examples.shape[0], 784)).astype(np.float32) / 255.
-    train_labels = train_labels.astype(int)
-    train_targets = one_hot(train_labels)
+    num_features = np.prod(train_samples.shape[1:])
+    num_classes = np.unique(train_labels).size
+
+    train_samples = to_tensor(train_samples)
+    test_samples = to_tensor(test_samples)
+    train_targets = one_hot(train_labels, num_classes)
     test_labels = test_labels.astype(int)
     
-    train_data = list(zip(train_examples, train_targets))
-    test_data = list(zip(test_examples, test_labels))
+    train_data = list(zip(train_samples, train_targets))
+    test_data = list(zip(test_samples, test_labels))
 
-    model = MLP(sizes=[784, 30, 10])
+    model = MLP(sizes=[num_features, 100, num_classes])
 
-    model.fit(train_data, epochs=30, batch_size=10, lr=3.0, val_data=test_data)
+    model.fit(train_data, epochs=50, batch_size=128, lr=1.0, val_data=test_data)
