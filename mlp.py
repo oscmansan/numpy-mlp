@@ -1,15 +1,17 @@
 import os
+import argparse
 import urllib.request
 
 import numpy as np
-from tqdm import tqdm
+from tqdm import tqdm  # for the progress bars
 
 
 def sigmoid(z):
     return 1.0 / (1.0 + np.exp(-z))
 
 
-def sigmoid_grad(z):
+def sigmoid_derivative(z):
+    # exploits the fact that the derivative is a simple function of the output from the sigmoid function
     return z * (1 - z)
 
 
@@ -29,9 +31,9 @@ def cross_entropy(x, y, eps=1e-15):
     return -(y * np.log(x)).sum(axis=1)
 
 
-def dataloader(data, batch_size):
+def data_loader(data, batch_size):
     for i in range(0, len(data), batch_size):
-        batch = data[i:i+batch_size]
+        batch = data[i:i + batch_size]
         x, y = zip(*batch)
         x = np.array(x)
         y = np.array(y)
@@ -48,30 +50,37 @@ class MLP:
     
     def forward(self, x):
         activations = [x]
+
+        # iterate over hidden layers
         for i in range(self.num_layers - 1):
             x = x @ self.weights[i].T + self.biases[i]
             if i < (self.num_layers - 2):
-                x = sigmoid(x)
+                x = sigmoid(x)  # for the hidden layers
             else:
-                x = softmax(x)
+                x = softmax(x)  # for the last layer
             activations.append(x)
+
         return activations
 
     def backprop(self, x, y):
         bsz = x.shape[0]
 
-        # forward
+        # forward propagate
         activations = self.forward(x)
         loss = cross_entropy(activations[-1], y)
 
-        # backward
+        # backward propagate
         grad_weights = [None] * len(self.weights)
         grad_biases = [None] * len(self.biases)
+
+        # compute gradient for the last layer
         delta = activations[-1] - y
         grad_weights[-1] = delta.reshape((bsz, -1, 1)) @ activations[-2].reshape((bsz, 1, -1))
         grad_biases[-1] = delta
+
+        # iterate over hidden layers
         for i in range(self.num_layers - 2, 0, -1):
-            delta = (delta @ self.weights[i]) * sigmoid_grad(activations[i])
+            delta = (delta @ self.weights[i]) * sigmoid_derivative(activations[i])
             grad_weights[i - 1] = delta.reshape((bsz, -1, 1)) @ activations[i - 1].reshape((bsz, 1, -1))
             grad_biases[i - 1] = delta
         
@@ -81,14 +90,14 @@ class MLP:
         log = {}
         for epoch in range(epochs):
             np.random.shuffle(train_data)
-            with tqdm(dataloader(train_data, batch_size), desc=f'Epoch {epoch}', leave=(epoch == epochs-1)) as pbar:
+            with tqdm(data_loader(train_data, batch_size), desc=f'Epoch {epoch}', leave=(epoch == epochs-1)) as pbar:
                 for batch in pbar:
                     loss = self.train_step(batch, lr)
                     log['train_loss'] = f'{loss:.6f}'
                     pbar.set_postfix(**log)
                 if val_data:
                     accuracies = []
-                    for batch in tqdm(dataloader(val_data, batch_size), desc='Validating', leave=False):
+                    for batch in tqdm(data_loader(val_data, batch_size), desc='Validating', leave=False):
                         accuracy = self.val_step(batch)
                         accuracies.append(accuracy)
                     log['val_acc'] = f'{np.mean(accuracies):05.2f}'
@@ -111,6 +120,7 @@ class MLP:
         x, y = batch
         bsz = x.shape[0]
 
+        # compute validation accuracy
         logits = self.forward(x)[-1]
         predicted = logits.argmax(axis=1)
         correct = (predicted == y).sum()
@@ -134,7 +144,16 @@ def one_hot(y, num_classes=10):
 
 
 if __name__ == "__main__":
-    filename = 'data/mnist.npz'
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data_dir', type=str, default='data')
+    parser.add_argument('--hidden_dims', type=int, nargs='+', default=[100])
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--learning_rate', type=float, default=1.0)
+    args = parser.parse_args()
+
+    # load mnist dataset
+    filename = os.path.join(args.data_dir, 'mnist.npz')
     if not os.path.exists(filename):
         urllib.request.urlretrieve('https://storage.googleapis.com/tensorflow/tf-keras-datasets/mnist.npz', filename)
     with np.load(filename) as data:
@@ -146,6 +165,7 @@ if __name__ == "__main__":
     num_features = np.prod(train_samples.shape[1:])
     num_classes = np.unique(train_labels).size
 
+    # preprocess data
     train_samples = to_tensor(train_samples)
     test_samples = to_tensor(test_samples)
     train_targets = one_hot(train_labels, num_classes)
@@ -154,6 +174,6 @@ if __name__ == "__main__":
     train_data = list(zip(train_samples, train_targets))
     test_data = list(zip(test_samples, test_labels))
 
-    model = MLP(sizes=[num_features, 100, num_classes])
-
-    model.fit(train_data, epochs=50, batch_size=128, lr=1.0, val_data=test_data)
+    # train mlp on mnist
+    model = MLP(sizes=[num_features, *args.hidden_dims, num_classes])
+    model.fit(train_data, args.epochs, args.batch_size, args.learning_rate, val_data=test_data)
